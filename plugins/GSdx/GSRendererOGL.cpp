@@ -249,8 +249,107 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 	GSDeviceOGL::OMColorMaskSelector om_csel;
 	GSDeviceOGL::OMDepthStencilSelector om_dssel;
 
+	if ((context->FRAME.PSM & 0x2) && (context->TEX0.PSM & 2) && (m_vt.m_primclass == GS_SPRITE_CLASS)) {
+		ps_sel.shuffle = 1;
+		ps_sel.dfmt = 0;
+
+		const GIFRegXYOFFSET& o = m_context->XYOFFSET;
+		GSVertex* v = &m_vertex.buff[0];
+		size_t count = m_vertex.next;
+
+		// vertex position is 8 to 16 pixels, therefore it is the 16-31 bits of the colors
+		bool write_ba = (((v[0].XYZ.X - o.OFX) & 0xF0) == 128);
+		// Read texture is 8 to 16 pixels (same as above)
+		ps_sel.read_ba = ((v[0].U & 0xF0) == 128);
+
+		GL_INS("Color shuffle %s => %s", ps_sel.read_ba ? "BA" : "RG", write_ba ? "BA" : "RG");
+
+		// Convert the vertex info to a 32 bits color format equivalent
+		for(size_t i = 0; i < count; i += 2) {
+			if (write_ba)
+				v[i].XYZ.X   -= 128u;
+			else
+				v[i+1].XYZ.X += 128u;
+
+			if (ps_sel.read_ba)
+				v[i].U       -= 128u;
+			else
+				v[i+1].U     += 128u;
+
+			// Height is too big (2x).
+			int tex_offset = v[i].V & 0xF;
+			GSVector4i offset(o.OFY, tex_offset, o.OFY, tex_offset);
+
+			GSVector4i tmp(v[i].XYZ.Y, v[i].V, v[i+1].XYZ.Y, v[i+1].V);
+			tmp = ((tmp - offset) >> 1) + offset;
+
+			v[i].XYZ.Y   = tmp.x;
+			v[i].V       = tmp.y;
+			v[i+1].XYZ.Y = tmp.z;
+			v[i+1].V     = tmp.w;
+		}
+
+		// Please bang my head against the wall!
+		// 1/ Reduce the frame mask to a 16 bit format
+		const uint32& m = context->FRAME.FBMSK;
+		uint32 fbmask = ((m >> 3) & 0x1F) | ((m >> 6) & 0x3E0) | ((m >> 9) & 0x7C00) | ((m >> 31) & 0x8000);
+		om_csel.wrgba = 0;
+
+		// 2 Select the new mask (Please someone put SSE here)
+		if ((fbmask & 0xFF) == 0) {
+			if (write_ba)
+				om_csel.wb = 1;
+			else
+				om_csel.wr = 1;
+		} else if ((fbmask & 0xFF) != 0xFF) {
+			fprintf(stderr, "Please fix me!\n");
+			ASSERT(0);
+		}
+
+		fbmask >>= 8;
+		if ((fbmask & 0xFF) == 0) {
+			if (write_ba)
+				om_csel.wa = 1;
+			else
+				om_csel.wg = 1;
+		} else if ((fbmask & 0xFF) != 0xFF) {
+			fprintf(stderr, "Please fix me!\n");
+			ASSERT(0);
+		}
+
+	} else {
+		ps_sel.dfmt = GSLocalMemory::m_psm[context->FRAME.PSM].fmt;
+
+		om_csel.wrgba = ~GSVector4i::load((int)context->FRAME.FBMSK).eq8(GSVector4i::xffffffff()).mask();
+
+		{
+#ifdef ENABLE_OGL_DEBUG
+			uint8 r_mask = (context->FRAME.FBMSK >> 0)  & 0xFF;
+			uint8 g_mask = (context->FRAME.FBMSK >> 8)  & 0xFF;
+			uint8 b_mask = (context->FRAME.FBMSK >> 16) & 0xFF;
+			uint8 a_mask = (context->FRAME.FBMSK >> 24) & 0xFF;
+			uint8 bits = (GSLocalMemory::m_psm[context->FRAME.PSM].fmt == 2) ? 16 : 32;
+			if (r_mask != 0 && r_mask != 0xFF) {
+				GL_INS("ERROR: not supported r_mask:%x on %d bits format", r_mask, bits);
+				ASSERT(0);
+			}
+			if (g_mask != 0 && g_mask != 0xFF) {
+				GL_INS("ERROR: not supported g_mask:%x on %d bits format", g_mask, bits);
+				ASSERT(0);
+			}
+			if (b_mask != 0 && b_mask != 0xFF) {
+				GL_INS("ERROR: not supported b_mask:%x on %d bits format", b_mask, bits);
+				ASSERT(0);
+			}
+			if (a_mask != 0 && a_mask != 0xFF) {
+				GL_INS("ERROR: not supported a_mask:%x on %d bits format", a_mask, bits);
+				ASSERT(0);
+			}
+#endif
+		}
+	}
+
 	// Format of the output
-	ps_sel.dfmt = GSLocalMemory::m_psm[context->FRAME.PSM].fmt;
 
 	GIFRegALPHA ALPHA = context->ALPHA;
 	float afix = (float)context->ALPHA.FIX / 0x80;
@@ -287,7 +386,6 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 		}
 	}
 
-	om_csel.wrgba = ~GSVector4i::load((int)context->FRAME.FBMSK).eq8(GSVector4i::xffffffff()).mask();
 	if (ps_sel.dfmt == 1) {
 		if (ALPHA.C == 1) {
 			// 24 bits no alpha channel so use 1.0f fix factor as equivalent
@@ -473,7 +571,9 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 	}
 
 	ps_sel.fba = context->FBA.FBA;
+	// TODO deprecat this stuff
 	ps_sel.aout = context->FRAME.PSM == PSM_PSMCT16 || context->FRAME.PSM == PSM_PSMCT16S || (context->FRAME.FBMSK & 0xff000000) == 0x7f000000 ? 1 : 0;
+	ps_sel.aout &= !ps_sel.shuffle;
 		
 	if (UserHacks_AlphaHack) ps_sel.aout = 1;
 
@@ -526,7 +626,10 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 
 		ps_sel.wms = context->CLAMP.WMS;
 		ps_sel.wmt = context->CLAMP.WMT;
-		if (tex->m_palette) {
+
+		if (ps_sel.shuffle) {
+			ps_sel.fmt = 0;
+		} else if (tex->m_palette) {
 			ps_sel.fmt = cpsm.fmt | 4;
 			ps_sel.ifmt = !tex->m_alpha_palette ? 0
 				: (context->TEX0.PSM == 0x1B) ? 3
