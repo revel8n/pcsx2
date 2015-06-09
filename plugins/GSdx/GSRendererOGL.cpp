@@ -302,7 +302,7 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 			else
 				om_csel.wr = 1;
 		} else if ((fbmask & 0xFF) != 0xFF) {
-			fprintf(stderr, "Please fix me!\n");
+			GL_INS("ERROR: not supported RG mask:%x", fbmask & 0xFF);
 			ASSERT(0);
 		}
 
@@ -313,7 +313,7 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 			else
 				om_csel.wg = 1;
 		} else if ((fbmask & 0xFF) != 0xFF) {
-			fprintf(stderr, "Please fix me!\n");
+			GL_INS("ERROR: not supported BA mask:%x", fbmask & 0xFF);
 			ASSERT(0);
 		}
 
