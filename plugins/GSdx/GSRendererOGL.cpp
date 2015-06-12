@@ -264,7 +264,6 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 		int tex_pos = v[0].U & 0xFF;
 		ps_sel.read_ba = (tex_pos > 112 && tex_pos < 144);
 
-		GL_INS("Color shuffle %s => %s", ps_sel.read_ba ? "BA" : "RG", write_ba ? "BA" : "RG");
 		//GL_INS("First vertex is  P: %d => %d    T: %d => %d", v[0].XYZ.X, v[1].XYZ.X, v[0].U, v[1].U);
 
 		// Convert the vertex info to a 32 bits color format equivalent
@@ -300,10 +299,13 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 
 		// 2 Select the new mask (Please someone put SSE here)
 		if ((fbmask & 0xFF) == 0) {
-			if (write_ba)
+			if (write_ba) {
+				GL_INS("Color shuffle %s => B", ps_sel.read_ba ? "B" : "R");
 				om_csel.wb = 1;
-			else
+			} else {
+				GL_INS("Color shuffle %s => R", ps_sel.read_ba ? "B" : "R");
 				om_csel.wr = 1;
+			}
 		} else if ((fbmask & 0xFF) != 0xFF) {
 			GL_INS("ERROR: not supported RG mask:%x", fbmask & 0xFF);
 			ASSERT(0);
@@ -311,10 +313,13 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 
 		fbmask >>= 8;
 		if ((fbmask & 0xFF) == 0) {
-			if (write_ba)
+			if (write_ba) {
+				GL_INS("Color shuffle %s => A", ps_sel.read_ba ? "A" : "G");
 				om_csel.wa = 1;
-			else
+			} else {
+				GL_INS("Color shuffle %s => G", ps_sel.read_ba ? "A" : "G");
 				om_csel.wg = 1;
+			}
 		} else if ((fbmask & 0xFF) != 0xFF) {
 			GL_INS("ERROR: not supported BA mask:%x", fbmask & 0xFF);
 			ASSERT(0);
