@@ -146,4 +146,8 @@ public:
 
 	void IncAge();
 	bool UserHacks_HalfPixelOffset;
+
+	const char* to_string(int type) {
+		return (type == DepthStencil) ? "Depth" : "Color";
+	}
 };
