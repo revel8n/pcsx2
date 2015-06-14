@@ -649,7 +649,7 @@ void GSRendererOGL::DrawPrims(GSTexture* rt, GSTexture* ds, GSTextureCache::Sour
 			// reinterpreted as an index. Star Ocean 3 uses it to emulate a stencil buffer.
 			// It is a very bad idea to force bilinear filtering on it.
 			if (ps_sel.ifmt)
-				bilinear = m_vt.IsLinear();
+				bilinear &= m_vt.IsLinear();
 
 			//GL_INS("Use palette with format %d and index format %d", ps_sel.fmt, ps_sel.ifmt);
 		} else {
