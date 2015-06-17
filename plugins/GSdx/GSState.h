@@ -145,7 +145,6 @@ protected:
 	int UserHacks_AggressiveCRC;
 	int UserHacks_DisableCrcHacks;
 	int UserHacks_WildHack;
-	bool UserHacks_AutoSkipDrawDepth;
     bool isPackedUV_HackFlag;
 
 	GSVertex m_v;

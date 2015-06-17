@@ -67,7 +67,6 @@ GSState::GSState()
 	UserHacks_AggressiveCRC = !!theApp.GetConfig("UserHacks", 0) ? theApp.GetConfig("UserHacks_AggressiveCRC", 0) : 0;
 	UserHacks_DisableCrcHacks = !!theApp.GetConfig("UserHacks", 0) ? theApp.GetConfig( "UserHacks_DisableCrcHacks", 0 ) : 0;
 	UserHacks_WildHack = !!theApp.GetConfig("UserHacks", 0) ? theApp.GetConfig("UserHacks_WildHack", 0) : 0;
-	UserHacks_AutoSkipDrawDepth = !!theApp.GetConfig("UserHacks", 0) ? theApp.GetConfig("UserHacks_AutoSkipDrawDepth", 1) : false;
 
 	memset(&m_v, 0, sizeof(m_v));
 	memset(&m_vertex, 0, sizeof(m_vertex));
@@ -5563,23 +5562,12 @@ bool GSState::IsBadFrame(int& skip, int UserHacks_SkipDraw)
 			}
 		}
 	}
-	// Mimic old GSdx behavior (skipping all depth textures with a skip value of 1), to avoid floods of bug reports
-	// that games are broken, when the user hasn't found the skiphack yet. (God of War, sigh...)
-	else if ((skip == 0) && UserHacks_AutoSkipDrawDepth)
-	{
-		if(fi.TME)
-		{
-			if(fi.TPSM == PSM_PSMZ32 || fi.TPSM == PSM_PSMZ24 || fi.TPSM == PSM_PSMZ16 || fi.TPSM == PSM_PSMZ16S)
-			{
-				skip = 1;
-			}
-		}
 #ifdef ENABLE_OGL_DEBUG
-	} else if (fi.TME) {
+	else if (fi.TME) {
 			if(fi.TPSM == PSM_PSMZ32 || fi.TPSM == PSM_PSMZ24 || fi.TPSM == PSM_PSMZ16 || fi.TPSM == PSM_PSMZ16S)
 				GL_INS("!!! Depth Texture 0x%x!!!", fi.TPSM);
-#endif
 	}
+#endif
 
 	if(skip > 0)
 	{
