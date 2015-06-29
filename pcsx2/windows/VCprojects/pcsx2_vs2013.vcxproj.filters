@@ -865,6 +865,9 @@
     <ClCompile Include="..\..\CDVD\ChunksCache.cpp">
       <Filter>System\ISO</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\DebugTools\GDBThread.cpp">
+      <Filter>System\Ps2\Debug</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\Patch.h">
@@ -1298,6 +1301,9 @@
     </ClInclude>
     <ClInclude Include="..\..\CDVD\CompressedFileReaderUtils.h">
       <Filter>System\ISO</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\DebugTools\GDBThread.h">
+      <Filter>System\Ps2\Debug</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
