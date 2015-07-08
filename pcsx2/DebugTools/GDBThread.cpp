@@ -17,10 +17,137 @@
 
 #include "GDBThread.h"
 
+#include "DebugInterface.h"
+#include "Breakpoints.h"
+#include "DisassemblyManager.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <fcntl.h>
+#include <signal.h>
+//#include <unistd.h>
+#ifdef _WIN32
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <iphlpapi.h>
+#else
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#endif
+#include <stdarg.h>
+
+
+#undef dbgprintf
+#ifndef DEBUG_GDB
+#define dbgprintf(...)
+#else
+#define dbgprintf printf
+#endif
+
+#define		GDB_BFR_MAX	10000
+#define		GDB_MAX_BP	100
+
+#define		GDB_STUB_START	'$'
+#define		GDB_STUB_END	'#'
+#define		GDB_STUB_ACK	'+'
+#define		GDB_STUB_NAK	'-'
+
+#ifdef _WIN32
+#define SIGTRAP 5
+#define	SIGTERM		15
+#define MSG_WAITALL  8
+#endif
+
+enum gdb_bp_type
+{
+    GDB_BP_TYPE_NONE = 0,
+    GDB_BP_TYPE_X,
+    GDB_BP_TYPE_R,
+    GDB_BP_TYPE_W,
+    GDB_BP_TYPE_A,
+};
+
+class gdb_stub
+{
+public:
+    gdb_stub();
+    ~gdb_stub();
+
+    void gdb_init(u32 port);
+    void gdb_deinit();
+
+    int gdb_data_available();
+
+    void gdb_handle_events();
+
+protected:
+    int sock = -1;
+    struct sockaddr_in saddr_server, saddr_client;
+
+    u8 cmd_bfr[GDB_BFR_MAX];
+    u32 cmd_len;
+
+    u32 sig = 0;
+    u32 send_signal = 0;
+
+    DisassemblyManager manager;
+
+protected:
+    void gdb_read_command();
+    void gdb_parse_command();
+
+    u8 gdb_read_byte();
+    u8 gdb_calc_chksum();
+
+    void gdb_reply(const char *reply);
+    void gdb_nak();
+    void gdb_ack();
+
+    void gdb_handle_signal();
+
+    void gdb_continue();
+
+    void gdb_detach();
+
+    void gdb_read_registers();
+    void gdb_write_registers();
+
+    void gdb_handle_set_thread();
+
+    void gdb_kill();
+
+    void gdb_read_mem();
+    void gdb_write_mem();
+
+    void gdb_read_register();
+    void gdb_write_register();
+
+    void gdb_handle_query();
+
+    void gdb_step();
+
+    void gdb_add_bp();
+    void gdb_remove_bp();
+
+    void gdb_pause();
+
+    void gdb_bp_add(u32 type, u32 addr, u32 len);
+    void gdb_bp_remove(u32 type, u32 addr, u32 len);
+
+
+    void fail(const char*) {}
+
+    static int gdb_bp_check(u32 addr, u32 type);
+
+    int gdb_signal(u32 s);
+};
+
 // --------------------------------------------------------------------------------------
 //  GDBThread Implementations
 // --------------------------------------------------------------------------------------
-GDBThread::GDBThread(u32 port)
+GDBThread::GDBThread(u32 port) :
+port(23946)
 {
 }
 
@@ -32,16 +159,807 @@ void GDBThread::OnStart()
 
 void GDBThread::ExecuteTaskInThread()
 {
-    if (!pxAssertDev(nullptr, "Gimme a damn Event Handler first, object whore.")) return;
+    gdb_stub gdb_interface;
 
-    while (true)
+    is_running = true;
+
+    while (is_running)
     {
-        if (!pxAssertDev(nullptr, "Event handler has been deallocated during SysExecutor thread execution.")) return;
+        gdb_interface.gdb_init(port);
 
+        while (0 <= gdb_interface.gdb_data_available())
+        {
+            gdb_interface.gdb_handle_events();
+        }
+
+        gdb_interface.gdb_deinit();
     }
 }
 
 void GDBThread::OnCleanupInThread()
 {
+    is_running = false;
     _parent::OnCleanupInThread();
+}
+
+
+
+// private helpers
+static u8 hex2char(u8 hex)
+{
+    if (hex >= '0' && hex <= '9')
+        return hex - '0';
+    else if (hex >= 'a' && hex <= 'f')
+        return hex - 'a' + 0xa;
+    else if (hex >= 'A' && hex <= 'F')
+        return hex - 'A' + 0xa;
+
+    printf("Invalid nibble: %c (%02x)\n", hex, hex);
+    return 0;
+}
+
+static u8 nibble2hex(u8 n)
+{
+    n &= 0xf;
+    if (n < 0xa)
+        return '0' + n;
+    else
+        return 'A' + n - 0xa;
+}
+
+static void mem2hex(u8 *dst, u32 src, u32 len)
+{
+    u8 tmp;
+
+    while (len-- > 0)
+    {
+        tmp = r5900Debug.read8(src++);
+
+        *dst++ = nibble2hex(tmp >> 4);
+        *dst++ = nibble2hex(tmp);
+    }
+}
+
+static void hex2mem(u32 dst, u8 *src, u32 len)
+{
+    u8 tmp;
+
+    while (len-- > 0)
+    {
+        tmp = hex2char(*src++) << 4;
+        tmp |= hex2char(*src++);
+
+        r5900Debug.write8(dst++, tmp);
+    }
+}
+
+static void wbe32hex(u8 *p, u32 v)
+{
+    u32 i;
+
+    for (i = 0; i < 8; i++)
+        p[i] = nibble2hex(v >> (28 - 4 * i));
+}
+
+static u32 re32hex(u8 *p)
+{
+    u32 i;
+    u32 res = 0;
+
+    for (i = 0; i < 8; i++)
+        res = (res << 4) | hex2char(p[i]);
+
+    return res;
+}
+
+// GDB stub interface
+gdb_stub::gdb_stub() :
+sock(-1),
+sig(0),
+send_signal(0)
+{
+    manager.setCpu(&r5900Debug);
+}
+gdb_stub::~gdb_stub()
+{
+    gdb_deinit();
+}
+
+void gdb_stub::gdb_init(u32 port)
+{
+    int tmpsock;
+    socklen_t len = sizeof saddr_client;
+    int on;
+#ifdef _WIN32
+    WSADATA init_data;
+    WSAStartup(MAKEWORD(2, 2), &init_data);
+#endif
+
+    tmpsock = socket(AF_INET, SOCK_STREAM, 0);
+    if (tmpsock == -1)
+        fail("Failed to create gdb socket");
+
+    on = 1;
+    if (setsockopt(tmpsock, SOL_SOCKET, SO_REUSEADDR, (const char*)&on, sizeof on) < 0)
+        fail("Failed to setsockopt");
+
+    memset(&saddr_server, 0, sizeof saddr_server);
+    saddr_server.sin_family = AF_INET;
+    saddr_server.sin_port = htons(port);
+    saddr_server.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(tmpsock, (struct sockaddr *)&saddr_server, sizeof saddr_server) < 0)
+        fail("Failed to bind gdb socket");
+
+    if (listen(tmpsock, 1) < 0)
+        fail("Failed to listen to gdb socket");
+
+    printf("Waiting for gdb to connect...\n");
+    sock = accept(tmpsock, (struct sockaddr *)&saddr_client, &len);
+
+    if (sock < 0)
+    {
+        wprintf(L"accept failed with error: %ld\n", WSAGetLastError());
+        fail("Failed to accept gdb client");
+    }
+    printf("Client connected.\n");
+
+    saddr_client.sin_addr.s_addr = ntohl(saddr_client.sin_addr.s_addr);
+    /*if (((saddr_client.sin_addr.s_addr >> 24) & 0xff) != 127 ||
+    ((saddr_client.sin_addr.s_addr >> 16) & 0xff) !=   0 ||
+    ((saddr_client.sin_addr.s_addr >>  8) & 0xff) !=   0 ||
+    ((saddr_client.sin_addr.s_addr >>  0) & 0xff) !=   1)
+    fail("gdb: incoming connection not from localhost");
+    */
+    closesocket(tmpsock);
+}
+
+void gdb_stub::gdb_deinit()
+{
+    if (sock == -1)
+        return;
+
+    closesocket(sock);
+    sock = -1;
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+int gdb_stub::gdb_data_available()
+{
+    struct timeval t;
+    fd_set _fds, *fds = &_fds;
+
+    FD_ZERO(fds);
+    FD_SET(sock, fds);
+
+    t.tv_sec = 0;
+    t.tv_usec = 20;
+
+    if (select(sock + 1, fds, NULL, NULL, &t) < 0)
+        return -1;
+
+    if (FD_ISSET(sock, fds))
+        return 1;
+    return 0;
+}
+
+void gdb_stub::gdb_handle_events()
+{
+    if (sock == -1)
+        return;
+
+    while (0 < gdb_data_available())
+    {
+        gdb_read_command();
+        gdb_parse_command();
+    }
+}
+
+void gdb_stub::gdb_read_command(void)
+{
+    u8 c;
+    u8 chk_read, chk_calc;
+
+    cmd_len = 0;
+    memset(cmd_bfr, 0, sizeof cmd_bfr);
+
+    c = gdb_read_byte();
+    if (c != GDB_STUB_START)
+    {
+        dbgprintf("gdb: read invalid byte %02x\n", c);
+        return;
+    }
+
+    while ((c = gdb_read_byte()) != GDB_STUB_END)
+    {
+        cmd_bfr[cmd_len++] = c;
+        if (cmd_len == sizeof cmd_bfr)
+            fail("gdb: cmd_bfr overflow\n");
+    }
+
+    chk_read = hex2char(gdb_read_byte()) << 4;
+    chk_read |= hex2char(gdb_read_byte());
+
+    chk_calc = gdb_calc_chksum();
+
+    if (chk_calc != chk_read)
+    {
+        printf("gdb: invalid checksum: calculated %02x and read %02x for $%s# (length: %d)\n", chk_calc, chk_read, cmd_bfr, cmd_len);
+        cmd_len = 0;
+
+        gdb_nak();
+    }
+
+    dbgprintf("gdb: read command %c with a length of %d: %s\n", cmd_bfr[0], cmd_len, cmd_bfr);
+}
+
+void gdb_stub::gdb_parse_command(void)
+{
+    if (cmd_len == 0)
+        return;
+
+    switch (cmd_bfr[0])
+    {
+    case 'q':
+        gdb_handle_query();
+        break;
+    case 'H':
+        gdb_handle_set_thread();
+        break;
+    case '?':
+        gdb_handle_signal();
+        break;
+    case 'D':
+        gdb_detach();
+        break;
+    case 'k':
+        gdb_kill();
+        break;
+    case 'g':
+        gdb_read_registers();
+        break;
+    case 'G':
+        gdb_write_registers();
+        break;
+    case 'p':
+        gdb_read_register();
+        break;
+    case 'P':
+        gdb_write_register();
+        break;
+    case 'm':
+        gdb_read_mem();
+        break;
+    case 'M':
+        gdb_write_mem();
+        break;
+    case 'c':
+        gdb_continue();
+        break;
+    case 's':
+        gdb_step();
+        break;
+    case ' ':
+        gdb_pause();
+        break;
+    case 'z':
+        gdb_remove_bp();
+        break;
+    case 'Z':
+        gdb_add_bp();
+        break;
+    default:
+        gdb_ack();
+        gdb_reply("");
+        break;
+    }
+}
+
+u8 gdb_stub::gdb_read_byte(void)
+{
+    size_t res;
+    u8 c;
+
+    res = recv(sock, (char*)&c, 1, MSG_WAITALL);
+    if (res != 1)
+        fail("recv failed");
+
+    return c;
+}
+
+u8 gdb_stub::gdb_calc_chksum(void)
+{
+    u32 len = cmd_len;
+    u8 *ptr = cmd_bfr;
+    u8 c = 0;
+
+    while (len-- > 0)
+        c += *ptr++;
+
+    return c;
+}
+
+void gdb_stub::gdb_reply(const char *reply)
+{
+    u8 chk;
+    u32 left;
+    u8 *ptr;
+    int n;
+
+    memset(cmd_bfr, 0, sizeof cmd_bfr);
+
+    cmd_len = strlen(reply);
+    if (cmd_len + 4 > sizeof cmd_bfr)
+        fail("cmd_bfr overflow in gdb_reply");
+
+    memcpy(cmd_bfr + 1, reply, cmd_len);
+
+    cmd_len++;
+    chk = gdb_calc_chksum();
+    cmd_len--;
+    cmd_bfr[0] = GDB_STUB_START;
+    cmd_bfr[cmd_len + 1] = GDB_STUB_END;
+    cmd_bfr[cmd_len + 2] = nibble2hex(chk >> 4);
+    cmd_bfr[cmd_len + 3] = nibble2hex(chk);
+
+    dbgprintf("gdb: reply (len: %d): %s\n", cmd_len, cmd_bfr);
+
+    ptr = cmd_bfr;
+    left = cmd_len + 4;
+    while (left > 0)
+    {
+        n = send(sock, (const char*)ptr, left, 0);
+        if (n < 0)
+            fail("gdb: send failed");
+        left -= n;
+        ptr += n;
+    }
+}
+
+void gdb_stub::gdb_nak(void)
+{
+    const char nak = GDB_STUB_NAK;
+    size_t res;
+
+    res = send(sock, &nak, 1, 0);
+    if (res != 1)
+        fail("send failed");
+}
+
+void gdb_stub::gdb_ack(void)
+{
+    const char ack = GDB_STUB_ACK;
+    size_t res;
+
+    res = send(sock, &ack, 1, 0);
+    if (res != 1)
+        fail("send failed");
+}
+
+void gdb_stub::gdb_handle_signal(void)
+{
+    char bfr[128];
+
+    gdb_ack();
+    memset(bfr, 0, sizeof bfr);
+    sprintf(bfr, "T%02x81:%08x;", sig, r5900Debug.getPC());
+    gdb_reply(bfr);
+}
+
+void gdb_stub::gdb_continue(void)
+{
+    gdb_ack();
+
+	if (r5900Debug.isCpuPaused())
+	{
+		// If the current PC is on a breakpoint, the user doesn't want to do nothing.
+		CBreakPoints::SetSkipFirst(r5900Debug.getPC());
+		r5900Debug.resumeCpu();
+	}
+}
+
+void gdb_stub::gdb_detach(void)
+{
+    gdb_ack();
+    gdb_reply("OK");
+}
+
+void gdb_stub::gdb_read_registers(void)
+{
+    u8 bfr[GDB_BFR_MAX - 4] = { 0 };
+    u32 i, j;
+
+    gdb_ack();
+    memset(bfr, 0, sizeof bfr);
+
+    for (i = 0; i < EECAT_COUNT; i++)
+    {
+        int cnt = r5900Debug.getRegisterCount(i);
+        for (j = 0; j < cnt; j++)
+        {
+            u128 value = r5900Debug.getRegister(i, j);
+
+            wbe32hex(bfr + j * 32 + 0,  value._u32[0]);
+            wbe32hex(bfr + j * 32 + 8,  value._u32[1]);
+            wbe32hex(bfr + j * 32 + 16, value._u32[2]);
+            wbe32hex(bfr + j * 32 + 24, value._u32[3]);
+        }
+    }
+
+    gdb_reply((char *)bfr);
+}
+
+void gdb_stub::gdb_write_registers(void)
+{
+    gdb_ack();
+
+    u32 i, j;
+
+    for (i = 0; i < EECAT_COUNT; i++)
+    {
+        int cnt = r5900Debug.getRegisterCount(i);
+        for (j = 0; j < cnt; j++)
+        {
+            u128 value;
+
+            value._u32[0] = re32hex(cmd_bfr + i * 32 + 0);
+            value._u32[1] = re32hex(cmd_bfr + i * 32 + 8);
+            value._u32[2] = re32hex(cmd_bfr + i * 32 + 16);
+            value._u32[3] = re32hex(cmd_bfr + i * 32 + 24);
+
+            r5900Debug.setRegister(i, j, value);
+        }
+    }
+
+    gdb_reply("OK");
+}
+
+void gdb_stub::gdb_handle_set_thread(void)
+{
+    gdb_ack();
+    if (memcmp(cmd_bfr, "Hg0", 3) == 0 ||
+        memcmp(cmd_bfr, "Hc-1", 4) == 0)
+        return gdb_reply("OK");
+    gdb_reply("E01");
+}
+
+void gdb_stub::gdb_kill(void)
+{
+    gdb_ack();
+    fail("killed by gdb");
+}
+
+void gdb_stub::gdb_read_mem(void)
+{
+    u8 reply[GDB_BFR_MAX - 4] = { 0 };
+    u32 addr, len;
+    u32 i;
+
+    gdb_ack();
+
+    i = 1;
+    addr = 0;
+    while (cmd_bfr[i] != ',')
+        addr = (addr << 4) | hex2char(cmd_bfr[i++]);
+
+    i++;
+
+    len = 0;
+    while (i < cmd_len)
+        len = (len << 4) | hex2char(cmd_bfr[i++]);
+    dbgprintf("gdb: read memory: %08x bytes from %08x\n", len, addr);
+
+    if (len * 2 > sizeof reply)
+        gdb_reply("E01");
+
+    mem2hex(reply, addr, len);
+    gdb_reply((char *)reply);
+}
+
+void gdb_stub::gdb_write_mem(void)
+{
+    u32 addr, len;
+    u32 i;
+
+    gdb_ack();
+
+    i = 1;
+    addr = 0;
+    while (cmd_bfr[i] != ',')
+        addr = (addr << 4) | hex2char(cmd_bfr[i++]);
+
+    i++;
+
+    len = 0;
+    while (cmd_bfr[i] != ':')
+        len = (len << 4) | hex2char(cmd_bfr[i++]);
+    dbgprintf("gdb: write memory: %08x bytes to %08x\n", len, addr);
+
+    hex2mem(addr, cmd_bfr + i, len);
+    gdb_reply("OK");
+}
+
+void gdb_stub::gdb_read_register(void)
+{
+    u8 reply[32] = { 0 };
+    u32 id;
+
+    //memset(reply, 0, sizeof reply);
+    id = hex2char(cmd_bfr[1]) << 4;
+    id |= hex2char(cmd_bfr[2]);
+
+    gdb_ack();
+
+    int category = ((id >> 16) & 0xFFFF);
+    int index = (id & 0xFFFF);
+
+    u128 value;
+
+    value = r5900Debug.getRegister(category, index);
+
+    wbe32hex(reply + 0, value._u32[0]);
+    wbe32hex(reply + 8, value._u32[1]);
+    wbe32hex(reply + 16, value._u32[2]);
+    wbe32hex(reply + 24, value._u32[3]);
+
+    gdb_reply((char *)reply);
+}
+
+void gdb_stub::gdb_write_register(void)
+{
+    u32 id;
+    u32 i;
+
+    id = hex2char(cmd_bfr[1]) << 4;
+    id |= hex2char(cmd_bfr[2]);
+
+    gdb_ack();
+
+    int category = ((id >> 16) & 0xFFFF);
+    int index = (id & 0xFFFF);
+
+    u128 value;
+
+    value._u32[0] = re32hex(cmd_bfr + 4 + 0);
+    value._u32[1] = re32hex(cmd_bfr + 4 + 8);
+    value._u32[2] = re32hex(cmd_bfr + 4 + 16);
+    value._u32[3] = re32hex(cmd_bfr + 4 + 24);
+
+    r5900Debug.setRegister(category, index, value);
+
+    gdb_reply("OK");
+}
+
+void gdb_stub::gdb_handle_query(void)
+{
+    dbgprintf("gdb: query '%s'\n", cmd_bfr + 1);
+    gdb_ack();
+    gdb_reply("");
+}
+
+void gdb_stub::gdb_step(void)
+{
+    gdb_ack();
+
+    if (!r5900Debug.isAlive() || !r5900Debug.isCpuPaused())
+        return;
+
+    // If the current PC is on a breakpoint, the user doesn't want to do nothing.
+    u32 currentPc = r5900Debug.getPC();
+    CBreakPoints::SetSkipFirst(currentPc);
+
+    MIPSAnalyst::MipsOpcodeInfo info = MIPSAnalyst::GetOpcodeInfo(&r5900Debug, currentPc);
+    u32 breakpointAddress = currentPc + manager.getInstructionSizeAt(currentPc);
+    if (info.isBranch)
+    {
+        if (info.isConditional == false)
+        {
+            breakpointAddress = info.branchTarget;
+        }
+        else
+        {
+            if (info.conditionMet)
+            {
+                breakpointAddress = info.branchTarget;
+            }
+            else
+            {
+                breakpointAddress = currentPc + 2 * 4;
+            }
+        }
+    }
+
+    if (info.isSyscall)
+        breakpointAddress = info.branchTarget;
+
+    CBreakPoints::AddBreakPoint(breakpointAddress, true);
+    r5900Debug.resumeCpu();
+}
+
+void gdb_stub::gdb_add_bp(void)
+{
+    u32 type, addr, len, i;
+
+    gdb_ack();
+
+    type = hex2char(cmd_bfr[1]);
+    switch (type)
+    {
+    case 0:
+    case 1:
+        type = GDB_BP_TYPE_X;
+        break;
+    case 2:
+        type = GDB_BP_TYPE_W;
+        break;
+    case 3:
+        type = GDB_BP_TYPE_R;
+        break;
+    case 4:
+        type = GDB_BP_TYPE_A;
+        break;
+    default:
+        return gdb_reply("E01");
+    }
+
+    addr = 0;
+    len = 0;
+
+    i = 3;
+    while (cmd_bfr[i] != ',')
+        addr = (addr << 4) | hex2char(cmd_bfr[i++]);
+    i++;
+
+    while (i < cmd_len)
+        len = (len << 4) | hex2char(cmd_bfr[i++]);
+
+    gdb_bp_add(type, addr, len);
+    gdb_reply("OK");
+}
+
+void gdb_stub::gdb_remove_bp(void)
+{
+    u32 type, addr, len, i;
+
+    gdb_ack();
+
+    type = hex2char(cmd_bfr[1]);
+    switch (type)
+    {
+    case 0:
+    case 1:
+        type = GDB_BP_TYPE_X;
+        break;
+    case 2:
+        type = GDB_BP_TYPE_W;
+        break;
+    case 3:
+        type = GDB_BP_TYPE_R;
+        break;
+    case 4:
+        type = GDB_BP_TYPE_A;
+        break;
+    default:
+        return gdb_reply("E01");
+    }
+
+    addr = 0;
+    len = 0;
+
+    i = 3;
+    while (cmd_bfr[i] != ',')
+        addr = (addr << 4) | hex2char(cmd_bfr[i++]);
+    i++;
+
+    while (i < cmd_len)
+        len = (len << 4) | hex2char(cmd_bfr[i++]);
+
+    gdb_bp_remove(type, addr, len);
+    gdb_reply("OK");
+}
+
+void gdb_stub::gdb_pause(void)
+{
+    gdb_ack();
+
+    if (!r5900Debug.isCpuPaused())
+    {
+        r5900Debug.pauseCpu();
+        send_signal = 1;
+    }
+}
+
+int gdb_stub::gdb_signal(u32 s)
+{
+    if (sock == -1)
+        return 1;
+
+    sig = s;
+
+    if (send_signal)
+    {
+        gdb_handle_signal();
+        send_signal = 0;
+    }
+
+    return 0;
+}
+
+void gdb_stub::gdb_bp_add(u32 type, u32 addr, u32 len)
+{
+    MemCheckCondition condition;
+    MemCheckResult result = MEMCHECK_BOTH;
+    bool is_mem_check = false;
+
+    switch (type)
+    {
+    case GDB_BP_TYPE_X:
+    {
+        is_mem_check = false;
+    }
+    break;
+    case GDB_BP_TYPE_W:
+    {
+        is_mem_check = true;
+        condition = MEMCHECK_WRITE;
+    }
+    break;
+    case GDB_BP_TYPE_R:
+    {
+        is_mem_check = true;
+        condition = MEMCHECK_READ;
+    }
+    break;
+    case GDB_BP_TYPE_A:
+    {
+        is_mem_check = true;
+        condition = MEMCHECK_READWRITE;
+    }
+    break;
+    }
+
+    if (is_mem_check)
+    {
+        CBreakPoints::AddMemCheck(addr, addr + len, condition, result);
+    }
+    else
+    {
+        CBreakPoints::AddBreakPoint(addr);
+    }
+
+    dbgprintf("gdb: added a %d breakpoint: %08x bytes at %08X\n", type, len, addr);
+}
+
+void gdb_stub::gdb_bp_remove(u32 type, u32 addr, u32 len)
+{
+    bool is_mem_check = false;
+
+    switch (type)
+    {
+    case GDB_BP_TYPE_X:
+    {
+        is_mem_check = false;
+    }
+    break;
+    case GDB_BP_TYPE_W:
+    case GDB_BP_TYPE_R:
+    case GDB_BP_TYPE_A:
+    {
+        is_mem_check = true;
+    }
+    break;
+    }
+
+    if (is_mem_check)
+    {
+        CBreakPoints::RemoveMemCheck(addr, addr + len);
+    }
+    else
+    {
+        CBreakPoints::RemoveBreakPoint(addr);
+    }
+
+    dbgprintf("gdb: removed a %d breakpoint: %08x bytes at %08X\n", type, len, addr);
 }

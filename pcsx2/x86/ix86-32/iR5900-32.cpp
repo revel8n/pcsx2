@@ -1282,13 +1282,15 @@ void dynarecCheckBreakpoint()
 	recExitExecution();
 }
 
-void dynarecMemcheck()
+void __fastcall dynarecMemcheck(u32 index)
 {
 	u32 pc = cpuRegs.pc;
  	if (CBreakPoints::CheckSkipFirst(pc) != 0)
 		return;
 
-	CBreakPoints::SetBreakpointTriggered(true);
+    auto checks = CBreakPoints::GetMemChecks();
+
+    CBreakPoints::SetBreakpointTriggered(true, checks[index].start, checks[index].cond);
 	GetCoreThread().PauseSelf();
 	recExitExecution();
 }
@@ -1346,7 +1348,10 @@ void recMemcheck(u32 op, u32 bits, bool store)
 			xCALL(&dynarecMemLogcheck);
 		}
 		if (checks[i].result & MEMCHECK_BREAK) {
-			xCALL(&dynarecMemcheck);
+            xPUSH(ecx);
+            xMOV(ecx, i);
+            xCALL(&dynarecMemcheck);
+            xPOP(ecx);
 		}
 
 		next1.SetTarget();

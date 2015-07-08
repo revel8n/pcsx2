@@ -27,6 +27,8 @@ u64 CBreakPoints::breakSkipFirstTicks_ = 0;
 std::vector<MemCheck> CBreakPoints::memChecks_;
 std::vector<MemCheck *> CBreakPoints::cleanupMemChecks_;
 bool CBreakPoints::breakpointTriggered_ = false;
+u64 CBreakPoints::breakpointAddress_ = -1;
+MemCheckCondition CBreakPoints::breakpointCondition_ = MEMCHECK_NONE;
 
 // called from the dynarec
 u32 __fastcall standardizeBreakpointAddress(u32 addr)

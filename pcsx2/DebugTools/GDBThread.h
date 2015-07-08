@@ -34,5 +34,9 @@ protected:
     void OnStart();
     void ExecuteTaskInThread();
     void OnCleanupInThread();
+
+protected:
+    bool is_running;
+    int port;
 };
 

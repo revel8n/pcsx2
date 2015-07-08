@@ -202,6 +202,13 @@ public:
 	u32 getNthPreviousAddress(u32 address, int n = 1);
 	u32 getNthNextAddress(u32 address, int n = 1);
 
+    u32 getInstructionSizeAt(u32 address)
+    {
+        u32 start = getStartAddress(address);
+        u32 next = getNthNextAddress(start, 1);
+        return next - address;
+    }
+
 	static int getMaxParamChars() { return maxParamChars; };
 private:
 	DisassemblyEntry* getEntry(u32 address);

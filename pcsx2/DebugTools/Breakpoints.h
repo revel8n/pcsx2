@@ -62,7 +62,8 @@ struct BreakPoint
 
 enum MemCheckCondition
 {
-	MEMCHECK_READ = 0x01,
+    MEMCHECK_NONE = 0x00,
+    MEMCHECK_READ = 0x01,
 	MEMCHECK_WRITE = 0x02,
 	MEMCHECK_WRITE_ONCHANGE = 0x04,
 
@@ -144,8 +145,19 @@ public:
 
 	static void Update(u32 addr = 0);
 
-	static void SetBreakpointTriggered(bool b) { breakpointTriggered_ = b; };
+    static void SetBreakpointTriggered(bool b, u64 addr = -1, MemCheckCondition cond = MEMCHECK_NONE)
+    {
+        breakpointTriggered_ = b;
+        breakpointAddress_ = addr;
+        breakpointCondition_ = cond;
+    };
 	static bool GetBreakpointTriggered() { return breakpointTriggered_; };
+    static bool GetBreakpointTriggered(u64& addr, MemCheckCondition& cond)
+    {
+        addr = breakpointAddress_;
+        cond = breakpointCondition_;
+        return breakpointTriggered_;
+    };
 
 private:
 	static size_t FindBreakpoint(u32 addr, bool matchTemp = false, bool temp = false);
@@ -156,6 +168,8 @@ private:
 	static u32 breakSkipFirstAt_;
 	static u64 breakSkipFirstTicks_;
 	static bool breakpointTriggered_;
+    static u64 breakpointAddress_;
+    static MemCheckCondition breakpointCondition_;
 
 	static std::vector<MemCheck> memChecks_;
 	static std::vector<MemCheck *> cleanupMemChecks_;
