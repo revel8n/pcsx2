@@ -463,6 +463,8 @@ bool Pcsx2App::OnInit()
 		AllocateCoreStuffs();
 		if( m_UseGUI ) OpenMainFrame();
 
+        GDBStubThread.Start();
+
 		
 		(new GameDatabaseLoaderThread())->Start();
 
@@ -546,7 +548,8 @@ void Pcsx2App::PrepForExit()
 	DispatchEvent( AppStatus_Exiting );
 
 	CoreThread.Cancel();
-	SysExecutorThread.ShutdownQueue();
+    GDBStubThread.Cancel();
+    SysExecutorThread.ShutdownQueue();
 
 	m_timer_Termination->Start( 500 );
 }
@@ -558,7 +561,8 @@ void Pcsx2App::CleanupRestartable()
 	AffinityAssert_AllowFrom_MainUI();
 
 	CoreThread.Cancel();
-	SysExecutorThread.ShutdownQueue();
+    GDBStubThread.Cancel();
+    SysExecutorThread.ShutdownQueue();
 	IdleEventDispatcher( L"Cleanup" );
 
 	if( g_Conf ) AppSaveSettings();
@@ -660,7 +664,7 @@ protected:
 
 
 Pcsx2App::Pcsx2App() 
-	: SysExecutorThread( new SysEvtHandler() )
+    : SysExecutorThread(new SysEvtHandler()), GDBStubThread(23946)
 {
 	// Warning: Do not delete this comment block! Gettext will parse it to allow
 	// the translation of some wxWidget internal strings. -- greg

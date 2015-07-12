@@ -17,6 +17,8 @@
 
 #include "Utilities/PersistentThread.h"
 
+class gdb_stub;
+
 // --------------------------------------------------------------------------------------
 //  GDBThread
 // --------------------------------------------------------------------------------------
@@ -30,6 +32,9 @@ public:
     GDBThread(u32 port);
     virtual ~GDBThread() throw() { }
 
+    void OnPause();
+    void OnResume();
+
 protected:
     void OnStart();
     void ExecuteTaskInThread();
@@ -38,5 +43,7 @@ protected:
 protected:
     bool is_running;
     int port;
+
+    gdb_stub* gdb_interface;
 };
 

@@ -17,6 +17,8 @@
 
 #include "GDBThread.h"
 
+#include "SysThreads.h"
+
 #include "DebugInterface.h"
 #include "Breakpoints.h"
 #include "DisassemblyManager.h"
@@ -37,13 +39,27 @@
 #endif
 #include <stdarg.h>
 
-
+#define DEBUG_GDB
 #undef dbgprintf
 #ifndef DEBUG_GDB
 #define dbgprintf(...)
 #else
-#define dbgprintf printf
+#define dbgprintf Console.WriteLn
 #endif
+
+#define fail(msg)   \
+{                   \
+    dbgprintf(msg); \
+    gdb_deinit();   \
+    return;         \
+}
+
+#define failr(msg)  \
+{                   \
+    dbgprintf(msg); \
+    gdb_deinit();   \
+    return 0;       \
+}
 
 #define		GDB_BFR_MAX	10000
 #define		GDB_MAX_BP	100
@@ -55,7 +71,9 @@
 
 #ifdef _WIN32
 #define SIGTRAP 5
-#define	SIGTERM		15
+#define	SIGTERM 15
+#define SIGSTOP 23 // values listed for MIPS?
+#define SIGCONT 25 // values listed for MIPS?
 #define MSG_WAITALL  8
 #endif
 
@@ -81,15 +99,19 @@ public:
 
     void gdb_handle_events();
 
+    void gdb_signal(u32 s, u64 addr = -1, MemCheckCondition cond = MEMCHECK_NONE);
+
 protected:
+    bool connected;
     int sock = -1;
     struct sockaddr_in saddr_server, saddr_client;
 
-    u8 cmd_bfr[GDB_BFR_MAX];
+    u8 cmd_bfr[GDB_BFR_MAX + 1];
     u32 cmd_len;
 
-    u32 sig = 0;
-    u32 send_signal = 0;
+    u32 sig;
+    u64 signal_addr;
+    MemCheckCondition signal_cond;
 
     DisassemblyManager manager;
 
@@ -134,52 +156,122 @@ protected:
 
     void gdb_bp_add(u32 type, u32 addr, u32 len);
     void gdb_bp_remove(u32 type, u32 addr, u32 len);
-
-
-    void fail(const char*) {}
-
-    static int gdb_bp_check(u32 addr, u32 type);
-
-    int gdb_signal(u32 s);
 };
 
 // --------------------------------------------------------------------------------------
 //  GDBThread Implementations
 // --------------------------------------------------------------------------------------
 GDBThread::GDBThread(u32 port) :
-port(23946)
+port(port),
+gdb_interface(nullptr)
 {
 }
 
 void GDBThread::OnStart()
 {
+    Console.WriteLn("GDB thread: On Start");
+
     m_name = L"GDBThread";
     _parent::OnStart();
 }
 
 void GDBThread::ExecuteTaskInThread()
 {
-    gdb_stub gdb_interface;
+    int oldtype = 0;
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &oldtype);
 
+    Console.WriteLn("Starting GDB stub thread.");
+
+    gdb_stub stub_interface;
+
+    gdb_interface = &stub_interface;
     is_running = true;
 
     while (is_running)
     {
-        gdb_interface.gdb_init(port);
-
-        while (0 <= gdb_interface.gdb_data_available())
+        if (!gdb_interface)
         {
-            gdb_interface.gdb_handle_events();
+            is_running = false;
+            break;
         }
 
-        gdb_interface.gdb_deinit();
+        if (r5900Debug.isAlive())
+        {
+            gdb_interface->gdb_init(port);
+
+            r5900Debug.pauseCpu();
+
+            while (is_running && (0 <= gdb_interface->gdb_data_available()))
+            {
+                gdb_interface->gdb_handle_events();
+
+                Threading::Sleep(0);
+            }
+
+            gdb_interface->gdb_deinit();
+        }
+
+        Threading::Sleep(0);
     }
+
+    gdb_interface = nullptr;
+
+    Console.WriteLn("Terminating GDB stub thread.");
 }
 
 void GDBThread::OnCleanupInThread()
 {
+    Console.WriteLn("GDB thread: On Cleanup");
+
     is_running = false;
+    if (gdb_interface)
+    {
+        gdb_interface->gdb_signal(SIGTERM);
+        gdb_interface->gdb_deinit();
+    }
     _parent::OnCleanupInThread();
+}
+
+void GDBThread::OnPause()
+{
+    u64 addr;
+    MemCheckCondition cond;
+
+    Console.WriteLn("GDB thread: On Pause");
+
+    if (!gdb_interface)
+        return;
+
+    if (GetCoreThread().IsClosing())
+    {
+        gdb_interface->gdb_signal(SIGTERM);
+        gdb_interface->gdb_deinit();
+    }
+    else if (CBreakPoints::GetBreakpointTriggered(addr, cond))
+    {
+        gdb_interface->gdb_signal(SIGTRAP, addr, cond);
+    }
+    else
+    {
+        gdb_interface->gdb_signal(SIGSTOP);
+    }
+}
+void GDBThread::OnResume()
+{
+    Console.WriteLn("GDB thread: On Resume");
+
+    if (!gdb_interface)
+        return;
+
+    if (GetCoreThread().IsClosing())
+    {
+        gdb_interface->gdb_signal(SIGTERM);
+        gdb_interface->gdb_deinit();
+    }
+    else
+    {
+        gdb_interface->gdb_signal(SIGCONT);
+    }
 }
 
 
@@ -194,7 +286,7 @@ static u8 hex2char(u8 hex)
     else if (hex >= 'A' && hex <= 'F')
         return hex - 'A' + 0xa;
 
-    printf("Invalid nibble: %c (%02x)\n", hex, hex);
+    dbgprintf("Invalid nibble: %c (%02x)\n", hex, hex);
     return 0;
 }
 
@@ -241,7 +333,15 @@ static void wbe32hex(u8 *p, u32 v)
         p[i] = nibble2hex(v >> (28 - 4 * i));
 }
 
-static u32 re32hex(u8 *p)
+static void wle32hex(u8 *p, u32 v)
+{
+    u32 i;
+
+    for (i = 0; i < 8; i++)
+        p[i] = nibble2hex(v >> (4 * (i ^ 1)));
+}
+
+static u32 rbe32hex(u8 *p)
 {
     u32 i;
     u32 res = 0;
@@ -252,11 +352,22 @@ static u32 re32hex(u8 *p)
     return res;
 }
 
+static u32 rle32hex(u8 *p)
+{
+    u32 i;
+    u32 res = 0;
+
+    for (i = 0; i < 8; i++)
+        res = (res) | (hex2char(p[i]) << (4 * (i ^ 1)));
+
+    return res;
+}
+
 // GDB stub interface
 gdb_stub::gdb_stub() :
 sock(-1),
 sig(0),
-send_signal(0)
+connected(false)
 {
     manager.setCpu(&r5900Debug);
 }
@@ -294,7 +405,21 @@ void gdb_stub::gdb_init(u32 port)
     if (listen(tmpsock, 1) < 0)
         fail("Failed to listen to gdb socket");
 
-    printf("Waiting for gdb to connect...\n");
+    sock = tmpsock;
+
+    dbgprintf("Waiting for gdb to connect...\n");
+    int result = 0;
+    while ((result = gdb_data_available()) == 0)
+    {
+        Threading::Sleep(0);
+    }
+
+    if (result < 0)
+    {
+        gdb_deinit();
+        return;
+    }
+
     sock = accept(tmpsock, (struct sockaddr *)&saddr_client, &len);
 
     if (sock < 0)
@@ -302,7 +427,7 @@ void gdb_stub::gdb_init(u32 port)
         wprintf(L"accept failed with error: %ld\n", WSAGetLastError());
         fail("Failed to accept gdb client");
     }
-    printf("Client connected.\n");
+    dbgprintf("Client connected.\n");
 
     saddr_client.sin_addr.s_addr = ntohl(saddr_client.sin_addr.s_addr);
     /*if (((saddr_client.sin_addr.s_addr >> 24) & 0xff) != 127 ||
@@ -312,12 +437,18 @@ void gdb_stub::gdb_init(u32 port)
     fail("gdb: incoming connection not from localhost");
     */
     closesocket(tmpsock);
+
+    connected = true;
 }
 
 void gdb_stub::gdb_deinit()
 {
     if (sock == -1)
         return;
+
+    connected = false;
+
+    shutdown(sock, SD_BOTH);
 
     closesocket(sock);
     sock = -1;
@@ -347,7 +478,7 @@ int gdb_stub::gdb_data_available()
 
 void gdb_stub::gdb_handle_events()
 {
-    if (sock == -1)
+    if (!connected)
         return;
 
     while (0 < gdb_data_available())
@@ -386,7 +517,7 @@ void gdb_stub::gdb_read_command(void)
 
     if (chk_calc != chk_read)
     {
-        printf("gdb: invalid checksum: calculated %02x and read %02x for $%s# (length: %d)\n", chk_calc, chk_read, cmd_bfr, cmd_len);
+        dbgprintf("gdb: invalid checksum: calculated %02x and read %02x for $%s# (length: %d)\n", chk_calc, chk_read, cmd_bfr, cmd_len);
         cmd_len = 0;
 
         gdb_nak();
@@ -459,12 +590,15 @@ void gdb_stub::gdb_parse_command(void)
 
 u8 gdb_stub::gdb_read_byte(void)
 {
+    if (!connected)
+        return 0;
+
     size_t res;
     u8 c;
 
     res = recv(sock, (char*)&c, 1, MSG_WAITALL);
     if (res != 1)
-        fail("recv failed");
+        failr("recv failed");
 
     return c;
 }
@@ -483,6 +617,9 @@ u8 gdb_stub::gdb_calc_chksum(void)
 
 void gdb_stub::gdb_reply(const char *reply)
 {
+    if (!connected)
+        return;
+
     u8 chk;
     u32 left;
     u8 *ptr;
@@ -520,6 +657,9 @@ void gdb_stub::gdb_reply(const char *reply)
 
 void gdb_stub::gdb_nak(void)
 {
+    if (!connected)
+        return;
+
     const char nak = GDB_STUB_NAK;
     size_t res;
 
@@ -530,6 +670,9 @@ void gdb_stub::gdb_nak(void)
 
 void gdb_stub::gdb_ack(void)
 {
+    if (!connected)
+        return;
+
     const char ack = GDB_STUB_ACK;
     size_t res;
 
@@ -540,51 +683,83 @@ void gdb_stub::gdb_ack(void)
 
 void gdb_stub::gdb_handle_signal(void)
 {
-    char bfr[128];
+    if (!connected)
+        return;
+
+    char bfr[128] = { 0 };
 
     gdb_ack();
+
     memset(bfr, 0, sizeof bfr);
-    sprintf(bfr, "T%02x81:%08x;", sig, r5900Debug.getPC());
+    switch (signal_cond)
+    {
+    case MEMCHECK_NONE:
+        sprintf(bfr, "T%02X", sig);
+        break;
+    case MEMCHECK_READ:
+        sprintf(bfr, "T%02Xrwatch:%08llX", sig, signal_addr);
+        break;
+    case MEMCHECK_WRITE:
+        sprintf(bfr, "T%02Xwatch:%08llX", sig, signal_addr);
+        break;
+    case MEMCHECK_READWRITE:
+        sprintf(bfr, "T%02Xawatch:%08llX", sig, signal_addr);
+        break;
+    default:
+        return;
+        break;
+    }
+
     gdb_reply(bfr);
 }
 
 void gdb_stub::gdb_continue(void)
 {
+    if (!connected)
+        return;
+
     gdb_ack();
 
-	if (r5900Debug.isCpuPaused())
-	{
-		// If the current PC is on a breakpoint, the user doesn't want to do nothing.
-		CBreakPoints::SetSkipFirst(r5900Debug.getPC());
-		r5900Debug.resumeCpu();
-	}
+    if (r5900Debug.isCpuPaused())
+    {
+        // If the current PC is on a breakpoint, the user doesn't want to do nothing.
+        CBreakPoints::SetSkipFirst(r5900Debug.getPC());
+        r5900Debug.resumeCpu();
+    }
 }
 
 void gdb_stub::gdb_detach(void)
 {
+    if (!connected)
+        return;
+
     gdb_ack();
     gdb_reply("OK");
+    gdb_deinit();
 }
 
 void gdb_stub::gdb_read_registers(void)
 {
+    if (!connected)
+        return;
+
     u8 bfr[GDB_BFR_MAX - 4] = { 0 };
-    u32 i, j;
+    u32 i, j, reg;
 
     gdb_ack();
     memset(bfr, 0, sizeof bfr);
 
-    for (i = 0; i < EECAT_COUNT; i++)
+    for (i = 0, reg = 0; i < EECAT_COUNT; ++i)
     {
         int cnt = r5900Debug.getRegisterCount(i);
-        for (j = 0; j < cnt; j++)
+        for (j = 0; j < cnt; ++j, ++reg)
         {
             u128 value = r5900Debug.getRegister(i, j);
 
-            wbe32hex(bfr + j * 32 + 0,  value._u32[0]);
-            wbe32hex(bfr + j * 32 + 8,  value._u32[1]);
-            wbe32hex(bfr + j * 32 + 16, value._u32[2]);
-            wbe32hex(bfr + j * 32 + 24, value._u32[3]);
+            wbe32hex(bfr + reg * 32 + 0,  value._u32[0]);
+            wbe32hex(bfr + reg * 32 + 8,  value._u32[1]);
+            wbe32hex(bfr + reg * 32 + 16, value._u32[2]);
+            wbe32hex(bfr + reg * 32 + 24, value._u32[3]);
         }
     }
 
@@ -593,21 +768,24 @@ void gdb_stub::gdb_read_registers(void)
 
 void gdb_stub::gdb_write_registers(void)
 {
+    if (!connected)
+        return;
+
     gdb_ack();
 
-    u32 i, j;
+    u32 i, j, reg;
 
-    for (i = 0; i < EECAT_COUNT; i++)
+    for (i = 0, reg = 0; i < EECAT_COUNT; ++i)
     {
         int cnt = r5900Debug.getRegisterCount(i);
-        for (j = 0; j < cnt; j++)
+        for (j = 0; j < cnt; ++j, ++reg)
         {
             u128 value;
 
-            value._u32[0] = re32hex(cmd_bfr + i * 32 + 0);
-            value._u32[1] = re32hex(cmd_bfr + i * 32 + 8);
-            value._u32[2] = re32hex(cmd_bfr + i * 32 + 16);
-            value._u32[3] = re32hex(cmd_bfr + i * 32 + 24);
+            value._u32[0] = rbe32hex(cmd_bfr + reg * 32 + 0);
+            value._u32[1] = rbe32hex(cmd_bfr + reg * 32 + 8);
+            value._u32[2] = rbe32hex(cmd_bfr + reg * 32 + 16);
+            value._u32[3] = rbe32hex(cmd_bfr + reg * 32 + 24);
 
             r5900Debug.setRegister(i, j, value);
         }
@@ -618,6 +796,9 @@ void gdb_stub::gdb_write_registers(void)
 
 void gdb_stub::gdb_handle_set_thread(void)
 {
+    if (!connected)
+        return;
+
     gdb_ack();
     if (memcmp(cmd_bfr, "Hg0", 3) == 0 ||
         memcmp(cmd_bfr, "Hc-1", 4) == 0)
@@ -627,12 +808,18 @@ void gdb_stub::gdb_handle_set_thread(void)
 
 void gdb_stub::gdb_kill(void)
 {
+    if (!connected)
+        return;
+
     gdb_ack();
     fail("killed by gdb");
 }
 
 void gdb_stub::gdb_read_mem(void)
 {
+    if (!connected)
+        return;
+
     u8 reply[GDB_BFR_MAX - 4] = { 0 };
     u32 addr, len;
     u32 i;
@@ -660,6 +847,9 @@ void gdb_stub::gdb_read_mem(void)
 
 void gdb_stub::gdb_write_mem(void)
 {
+    if (!connected)
+        return;
+
     u32 addr, len;
     u32 i;
 
@@ -683,17 +873,20 @@ void gdb_stub::gdb_write_mem(void)
 
 void gdb_stub::gdb_read_register(void)
 {
-    u8 reply[32] = { 0 };
-    u32 id;
+    if (!connected)
+        return;
 
-    //memset(reply, 0, sizeof reply);
-    id = hex2char(cmd_bfr[1]) << 4;
-    id |= hex2char(cmd_bfr[2]);
+    u8 reply[32] = { 0 };
+    u32 id = 0;
 
     gdb_ack();
 
-    int category = ((id >> 16) & 0xFFFF);
-    int index = (id & 0xFFFF);
+    int i = 1;
+    while (i < cmd_len)
+        id = (id << 4) | hex2char(cmd_bfr[i++]);
+
+    int category = ((id >> 8) & 0xFF);
+    int index = (id & 0xFF);
 
     u128 value;
 
@@ -709,23 +902,27 @@ void gdb_stub::gdb_read_register(void)
 
 void gdb_stub::gdb_write_register(void)
 {
-    u32 id;
-    u32 i;
+    if (!connected)
+        return;
 
-    id = hex2char(cmd_bfr[1]) << 4;
-    id |= hex2char(cmd_bfr[2]);
+    u32 id = 0;
 
     gdb_ack();
 
-    int category = ((id >> 16) & 0xFFFF);
-    int index = (id & 0xFFFF);
+    int i = 1;
+    while (cmd_bfr[i] != '=')
+        id = (id << 4) | hex2char(cmd_bfr[i++]);
+    ++i;
+
+    int category = ((id >> 8) & 0xFF);
+    int index = (id & 0xFF);
 
     u128 value;
 
-    value._u32[0] = re32hex(cmd_bfr + 4 + 0);
-    value._u32[1] = re32hex(cmd_bfr + 4 + 8);
-    value._u32[2] = re32hex(cmd_bfr + 4 + 16);
-    value._u32[3] = re32hex(cmd_bfr + 4 + 24);
+    value._u32[0] = rbe32hex(cmd_bfr + i + 0);
+    value._u32[1] = rbe32hex(cmd_bfr + i + 8);
+    value._u32[2] = rbe32hex(cmd_bfr + i + 16);
+    value._u32[3] = rbe32hex(cmd_bfr + i + 24);
 
     r5900Debug.setRegister(category, index, value);
 
@@ -734,6 +931,9 @@ void gdb_stub::gdb_write_register(void)
 
 void gdb_stub::gdb_handle_query(void)
 {
+    if (!connected)
+        return;
+
     dbgprintf("gdb: query '%s'\n", cmd_bfr + 1);
     gdb_ack();
     gdb_reply("");
@@ -741,6 +941,9 @@ void gdb_stub::gdb_handle_query(void)
 
 void gdb_stub::gdb_step(void)
 {
+    if (!connected)
+        return;
+
     gdb_ack();
 
     if (!r5900Debug.isAlive() || !r5900Debug.isCpuPaused())
@@ -780,11 +983,17 @@ void gdb_stub::gdb_step(void)
 
 void gdb_stub::gdb_add_bp(void)
 {
-    u32 type, addr, len, i;
+    if (!connected)
+        return;
+
+    u32 type = 0, addr = 0, len = 0, i = 1;
 
     gdb_ack();
 
-    type = hex2char(cmd_bfr[1]);
+    while (cmd_bfr[i] != ',')
+        type = (type << 4) | hex2char(cmd_bfr[i++]);
+    i++;
+
     switch (type)
     {
     case 0:
@@ -807,7 +1016,6 @@ void gdb_stub::gdb_add_bp(void)
     addr = 0;
     len = 0;
 
-    i = 3;
     while (cmd_bfr[i] != ',')
         addr = (addr << 4) | hex2char(cmd_bfr[i++]);
     i++;
@@ -821,11 +1029,17 @@ void gdb_stub::gdb_add_bp(void)
 
 void gdb_stub::gdb_remove_bp(void)
 {
-    u32 type, addr, len, i;
+    if (!connected)
+        return;
+
+    u32 type = 0, addr = 0, len = 0, i = 1;
 
     gdb_ack();
 
-    type = hex2char(cmd_bfr[1]);
+    while (cmd_bfr[i] != ',')
+        type = (type << 4) | hex2char(cmd_bfr[i++]);
+    i++;
+
     switch (type)
     {
     case 0:
@@ -848,7 +1062,6 @@ void gdb_stub::gdb_remove_bp(void)
     addr = 0;
     len = 0;
 
-    i = 3;
     while (cmd_bfr[i] != ',')
         addr = (addr << 4) | hex2char(cmd_bfr[i++]);
     i++;
@@ -862,29 +1075,24 @@ void gdb_stub::gdb_remove_bp(void)
 
 void gdb_stub::gdb_pause(void)
 {
+    if (!connected)
+        return;
+
     gdb_ack();
 
     if (!r5900Debug.isCpuPaused())
     {
         r5900Debug.pauseCpu();
-        send_signal = 1;
     }
 }
 
-int gdb_stub::gdb_signal(u32 s)
+void gdb_stub::gdb_signal(u32 s, u64 addr, MemCheckCondition cond)
 {
-    if (sock == -1)
-        return 1;
-
     sig = s;
+    signal_addr = addr;
+    signal_cond = cond;
 
-    if (send_signal)
-    {
-        gdb_handle_signal();
-        send_signal = 0;
-    }
-
-    return 0;
+    gdb_handle_signal();
 }
 
 void gdb_stub::gdb_bp_add(u32 type, u32 addr, u32 len)

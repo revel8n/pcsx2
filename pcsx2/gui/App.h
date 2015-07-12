@@ -31,6 +31,8 @@ class DisassemblyDialog;
 #include "System.h"
 #include "System/SysThreads.h"
 
+#include "DebugTools/GDBThread.h"
+
 typedef void FnType_OnThreadComplete(const wxCommandEvent& evt);
 typedef void (Pcsx2App::*FnPtr_Pcsx2App)();
 
@@ -483,6 +485,8 @@ public:
 	ExecutorThread					SysExecutorThread;
 	ScopedPtr<SysCpuProviderPack>	m_CpuProviders;
 	ScopedPtr<SysMainMemory>	m_VmReserve;
+
+    GDBThread GDBStubThread;
 
 protected:
 	wxWindowID			m_id_MainFrame;

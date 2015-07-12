@@ -709,7 +709,8 @@ GSFrame& Pcsx2App::GetGsFrame() const
 
 void Pcsx2App::enterDebugMode()
 {
-	DisassemblyDialog* dlg = GetDisassemblyPtr();
+    GDBStubThread.OnPause();
+    DisassemblyDialog* dlg = GetDisassemblyPtr();
 	if (dlg)
 		dlg->setDebugMode(true,false);
 }
@@ -717,6 +718,7 @@ void Pcsx2App::enterDebugMode()
 void Pcsx2App::leaveDebugMode()
 {
 	DisassemblyDialog* dlg = GetDisassemblyPtr();
+    GDBStubThread.OnResume();
 	if (dlg)
 		dlg->setDebugMode(false,false);
 }
