@@ -818,8 +818,10 @@ void gdb_stub::gdb_kill(void)
 
     gdb_ack();
 
+    gdb_deinit();
+
     GetCoreThread().Reset();
-    fail("killed by gdb");
+    dbgprintf("killed by gdb");
 }
 
 void gdb_stub::gdb_read_mem(void)
