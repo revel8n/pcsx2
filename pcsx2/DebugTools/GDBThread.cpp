@@ -77,6 +77,8 @@
 #define MSG_WAITALL  8
 #endif
 
+#define REGISTER_ID(category, index) ((category << 8) | index)
+
 enum gdb_bp_type
 {
     GDB_BP_TYPE_NONE = 0,
@@ -198,6 +200,9 @@ void GDBThread::ExecuteTaskInThread()
         if (r5900Debug.isAlive())
         {
             gdb_interface->gdb_init(port);
+
+            // abuse abort signal for attach
+            gdb_interface->gdb_signal(SIGABRT);
 
             r5900Debug.pauseCpu();
 
@@ -694,16 +699,16 @@ void gdb_stub::gdb_handle_signal(void)
     switch (signal_cond)
     {
     case MEMCHECK_NONE:
-        sprintf(bfr, "T%02X", sig);
+        sprintf(bfr, "T%02X%08X:%08X", sig, REGISTER_ID(EECAT_GPR, 32), r5900Debug.getPC());
         break;
     case MEMCHECK_READ:
-        sprintf(bfr, "T%02Xrwatch:%08llX", sig, signal_addr);
+        sprintf(bfr, "T%02X%08X:%08X;rwatch:%08llX", sig, REGISTER_ID(EECAT_GPR, 32), r5900Debug.getPC(), signal_addr);
         break;
     case MEMCHECK_WRITE:
-        sprintf(bfr, "T%02Xwatch:%08llX", sig, signal_addr);
+        sprintf(bfr, "T%02X%08X:%08X;watch:%08llX", sig, REGISTER_ID(EECAT_GPR, 32), r5900Debug.getPC(), signal_addr);
         break;
     case MEMCHECK_READWRITE:
-        sprintf(bfr, "T%02Xawatch:%08llX", sig, signal_addr);
+        sprintf(bfr, "T%02X%08X:%08X;awatch:%08llX", sig, REGISTER_ID(EECAT_GPR, 32), r5900Debug.getPC(), signal_addr);
         break;
     default:
         return;
@@ -812,6 +817,8 @@ void gdb_stub::gdb_kill(void)
         return;
 
     gdb_ack();
+
+    GetCoreThread().Reset();
     fail("killed by gdb");
 }
 
@@ -876,7 +883,7 @@ void gdb_stub::gdb_read_register(void)
     if (!connected)
         return;
 
-    u8 reply[32] = { 0 };
+    u8 reply[64] = { 0 };
     u32 id = 0;
 
     gdb_ack();
