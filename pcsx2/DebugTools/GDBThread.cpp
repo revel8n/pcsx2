@@ -39,7 +39,7 @@
 #endif
 #include <stdarg.h>
 
-#define DEBUG_GDB
+//#define DEBUG_GDB
 #undef dbgprintf
 #ifndef DEBUG_GDB
 #define dbgprintf(...)
@@ -646,7 +646,7 @@ void gdb_stub::gdb_reply(const char *reply)
     cmd_bfr[cmd_len + 2] = nibble2hex(chk >> 4);
     cmd_bfr[cmd_len + 3] = nibble2hex(chk);
 
-    dbgprintf("gdb: reply (len: %d): %s\n", cmd_len, cmd_bfr);
+    //dbgprintf("gdb: reply (len: %d): %s\n", cmd_len, cmd_bfr);
 
     ptr = cmd_bfr;
     left = cmd_len + 4;
