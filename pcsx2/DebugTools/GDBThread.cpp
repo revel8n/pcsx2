@@ -780,6 +780,8 @@ void gdb_stub::gdb_write_registers(void)
 
     u32 i, j, reg;
 
+    u8* bufptr = cmd_bfr + 1;
+
     for (i = 0, reg = 0; i < EECAT_COUNT; ++i)
     {
         int cnt = r5900Debug.getRegisterCount(i);
@@ -787,10 +789,10 @@ void gdb_stub::gdb_write_registers(void)
         {
             u128 value;
 
-            value._u32[0] = rbe32hex(cmd_bfr + reg * 32 + 0);
-            value._u32[1] = rbe32hex(cmd_bfr + reg * 32 + 8);
-            value._u32[2] = rbe32hex(cmd_bfr + reg * 32 + 16);
-            value._u32[3] = rbe32hex(cmd_bfr + reg * 32 + 24);
+            value._u32[0] = rbe32hex(bufptr + reg * 32 + 0);
+            value._u32[1] = rbe32hex(bufptr + reg * 32 + 8);
+            value._u32[2] = rbe32hex(bufptr + reg * 32 + 16);
+            value._u32[3] = rbe32hex(bufptr + reg * 32 + 24);
 
             r5900Debug.setRegister(i, j, value);
         }
